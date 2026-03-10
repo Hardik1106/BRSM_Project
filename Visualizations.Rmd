@@ -1,0 +1,1026 @@
+---
+title: "Visualizations"
+output:
+	html_document: default
+	pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+
+library(tidyverse)
+library(janitor)
+library(lubridate)
+library(scales)
+library(tidytext)
+
+dir.create("visualizations", showWarnings = FALSE, recursive = TRUE)
+
+save_plot <- function(plot_obj, file_name, width = 10, height = 6, dpi = 300) {
+	ggplot2::ggsave(
+		filename = file.path("visualizations", paste0(file_name, ".png")),
+		plot = plot_obj,
+		width = width,
+		height = height,
+		dpi = dpi
+	)
+}
+
+get_mode <- function(x) {
+	x_clean <- x[!is.na(x)]
+	if (length(x_clean) == 0) return(NA_real_)
+	vals <- unique(x_clean)
+	vals[which.max(tabulate(match(x_clean, vals)))]
+}
+```
+
+
+## 1) Data setup
+
+This section loads the survey data and reshapes repeated measures (video-wise ratings) into long format.  
+Long format makes it easier to compare responses across videos and participants.
+
+```{r data-setup}
+data_raw <- readr::read_csv("data/data.csv", show_col_types = FALSE) %>%
+	janitor::clean_names()
+
+# Optional labels (adjust if your coding differs)
+data_main <- data_raw %>%
+	mutate(
+		gender_label = case_when(
+			gender == 1 ~ "Male",
+			gender == 2 ~ "Female",
+			TRUE ~ "Other/NA"
+		),
+		vr_experience_label = factor(vr_experience)
+	)
+
+ratings_long <- data_main %>%
+	select(participant, matches("^(valence|arousal|immersion)_v[1-5]$")) %>%
+	pivot_longer(
+		cols = -participant,
+		names_to = c("measure", "video"),
+		names_pattern = "(valence|arousal|immersion)_v([1-5])",
+		values_to = "score"
+	) %>%
+	mutate(
+		video = factor(paste0("v", video), levels = paste0("v", 1:5)),
+		measure = factor(measure, levels = c("valence", "arousal", "immersion"))
+	)
+
+va_wide <- data_main %>%
+	select(participant, matches("^(valence|arousal)_v[1-5]$")) %>%
+	pivot_longer(
+		cols = -participant,
+		names_to = c("measure", "video"),
+		names_pattern = "(valence|arousal)_v([1-5])",
+		values_to = "score"
+	) %>%
+	mutate(video = factor(paste0("v", video), levels = paste0("v", 1:5))) %>%
+	pivot_wider(names_from = measure, values_from = score)
+
+prepost_long <- data_main %>%
+	select(participant, positive_affect_start, positive_affect_end,
+				 negative_affect_start, negative_affect_end) %>%
+	pivot_longer(
+		cols = -participant,
+		names_to = c("affect", "time"),
+		names_pattern = "(positive_affect|negative_affect)_(start|end)",
+		values_to = "score"
+	) %>%
+	mutate(
+		affect = recode(affect,
+										positive_affect = "Positive Affect",
+										negative_affect = "Negative Affect"),
+		time = factor(time, levels = c("start", "end"))
+	)
+```
+
+
+## 2) Data quality and structure
+
+These plots capture how complete the dataset is and whether there are fields with heavy missingness.
+
+```{r missingness-plot, fig.width=10, fig.height=4}
+missing_by_col <- data_main %>%
+	summarise(across(everything(), ~ mean(is.na(.)))) %>%
+	pivot_longer(cols = everything(), names_to = "variable", values_to = "missing_prop") %>%
+	filter(missing_prop > 0) %>%
+	arrange(desc(missing_prop))
+
+if (nrow(missing_by_col) == 0) {
+	p_missing <- ggplot() +
+		annotate("text", x = 1, y = 1, label = "No missing values found") +
+		xlim(0, 2) +
+		ylim(0, 2) +
+		labs(title = "Missingness by variable", x = NULL, y = NULL) +
+		theme_void(base_size = 11)
+} else {
+	p_missing <- ggplot(missing_by_col, aes(x = reorder(variable, -missing_prop), y = missing_prop)) +
+		geom_col(fill = "steelblue") +
+		coord_flip() +
+		scale_y_continuous(labels = percent_format(accuracy = 1)) +
+		labs(
+			title = "Missingness by variable (only variables with missing values)",
+			x = NULL,
+			y = "Missing proportion"
+		) +
+		theme_minimal(base_size = 11)
+}
+
+save_plot(p_missing, "01_missingness_by_variable", width = 10, height = 4)
+p_missing
+```
+
+
+## 3) Demographics and trait scales
+
+These plots summarize sample composition and baseline mental-health/trait distributions.
+
+```{r demographics, fig.width=10, fig.height=4}
+age_stats <- tibble(
+	stat = c("Mean", "Median", "Mode"),
+	value = c(
+		mean(data_main$age, na.rm = TRUE),
+		median(data_main$age, na.rm = TRUE),
+		get_mode(data_main$age)
+	)
+) %>%
+	mutate(stat_label = paste0(stat, ": ", round(value, 2)))
+
+age_color_map <- setNames(
+	c("#D62728", "#2CA02C", "#9467BD"),
+	age_stats$stat_label
+)
+
+p_age <- ggplot(data_main, aes(x = age)) +
+	geom_histogram(binwidth = 1, fill = "#4C78A8", color = "white") +
+	geom_vline(
+		data = age_stats,
+		aes(xintercept = value, color = stat_label),
+		linetype = "dashed",
+		linewidth = 0.7,
+		inherit.aes = FALSE,
+		show.legend = TRUE
+	) +
+	scale_color_manual(values = age_color_map) +
+	labs(title = "Age distribution", x = "Age", y = "Count") +
+	theme_minimal(base_size = 11) +
+	theme(legend.title = element_blank())
+
+gender_dist <- data_main %>%
+	count(gender_label) %>%
+	mutate(
+		prop = n / sum(n),
+		label = paste0(gender_label, " (", percent(prop, accuracy = 1), ")")
+	)
+
+p_gender <- ggplot(gender_dist, aes(x = "", y = n, fill = gender_label)) +
+	geom_col(width = 1, color = "white") +
+	coord_polar(theta = "y") +
+	geom_text(aes(label = label),
+		position = position_stack(vjust = 0.5),
+		size = 4,
+		color = "white"
+	) +
+	labs(title = "Gender distribution", x = NULL, y = NULL, fill = "Gender") +
+	theme_void(base_size = 11)
+
+p_vr <- ggplot(data_main, aes(x = vr_experience_label)) +
+	geom_bar(fill = "#F58518") +
+	labs(title = "VR experience levels", x = "VR experience", y = "Count") +
+	theme_minimal(base_size = 11)
+
+save_plot(p_age, "02_age_distribution", width = 10, height = 4)
+save_plot(p_gender, "03_gender_distribution", width = 6, height = 6)
+save_plot(p_vr, "04_vr_experience_levels", width = 10, height = 4)
+
+p_age
+p_gender
+p_vr
+```
+
+```{r trait-distributions, fig.width=10, fig.height=5}
+trait_cols <- c("score_phq", "score_gad", "score_stai_t", "score_vrise")
+
+traits_long <- data_main %>%
+	select(any_of(trait_cols)) %>%
+	pivot_longer(cols = everything(), names_to = "trait", values_to = "score")
+
+trait_stats_long <- traits_long %>%
+	group_by(trait) %>%
+	summarise(
+		mean_score = mean(score, na.rm = TRUE),
+		median_score = median(score, na.rm = TRUE),
+		mode_score = get_mode(score),
+		.groups = "drop"
+	) %>%
+	pivot_longer(
+		cols = c(mean_score, median_score, mode_score),
+		names_to = "stat_key",
+		values_to = "value"
+	) %>%
+	mutate(
+		stat = recode(stat_key,
+			mean_score = "Mean",
+			median_score = "Median",
+			mode_score = "Mode"
+		),
+		trait_short = recode(trait,
+			score_phq = "PHQ",
+			score_gad = "GAD",
+			score_stai_t = "STAI-T",
+			score_vrise = "VRISE",
+			.default = trait
+		),
+		stat_label = paste0(trait_short, " ", stat, ": ", round(value, 2))
+	)
+
+trait_color_map <- trait_stats_long %>%
+	distinct(stat_label, stat) %>%
+	mutate(color = case_when(
+		stat == "Mean" ~ "#D62728",
+		stat == "Median" ~ "#2CA02C",
+		TRUE ~ "#9467BD"
+	))
+
+p_trait_dist <- ggplot(traits_long, aes(x = score)) +
+	geom_histogram(bins = 20, fill = "#54A24B", color = "white") +
+	geom_vline(
+		data = trait_stats_long,
+		aes(xintercept = value, color = stat_label),
+		linetype = "dashed",
+		linewidth = 0.6,
+		inherit.aes = FALSE,
+		show.legend = TRUE
+	) +
+	scale_color_manual(values = setNames(trait_color_map$color, trait_color_map$stat_label)) +
+	facet_wrap(~ trait, scales = "free") +
+	labs(title = "Trait score distributions", x = "Score", y = "Count") +
+	theme_minimal(base_size = 11) +
+	theme(
+		legend.title = element_blank(),
+		legend.position = "bottom",
+		legend.text = element_text(size = 8)
+	)
+
+save_plot(p_trait_dist, "05_trait_score_distributions", width = 10, height = 5)
+p_trait_dist
+```
+
+```{r trait-correlations, fig.width=6, fig.height=5}
+trait_cor <- data_main %>%
+	select(any_of(trait_cols)) %>%
+	cor(use = "pairwise.complete.obs")
+
+trait_cor_df <- as.data.frame(as.table(trait_cor))
+names(trait_cor_df) <- c("trait_x", "trait_y", "correlation")
+
+p_trait_cor <- ggplot(trait_cor_df, aes(trait_x, trait_y, fill = correlation)) +
+	geom_tile() +
+	geom_text(aes(label = round(correlation, 2)), size = 3) +
+	scale_fill_gradient2(low = "#B2182B", mid = "white", high = "#2166AC", midpoint = 0) +
+	labs(title = "Correlation heatmap of trait scores", x = NULL, y = NULL) +
+	theme_minimal(base_size = 11) +
+	theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+save_plot(p_trait_cor, "06_trait_correlation_heatmap", width = 6, height = 5)
+p_trait_cor
+```
+
+```{r distress-strata-counts, fig.width=10, fig.height=5}
+distress_df <- data_main %>%
+	transmute(
+		participant,
+		phq = score_phq,
+		gad = score_gad,
+		distress_strata = case_when(
+			is.na(phq) | is.na(gad) ~ "Unclassified (missing PHQ/GAD)",
+			phq >= 10 & gad >= 10 ~ "BD (Both Distress)",
+			phq >= 5 & phq <= 9 & gad >= 5 & gad <= 9 ~ "BMD (Both Mild Distress)",
+			phq >= 10 & gad <= 9 ~ "ED-Dep (Either Distress: Depression)",
+			gad >= 10 & phq <= 9 ~ "ED-Anx (Either Distress: Anxiety)",
+			phq >= 5 & phq <= 9 & gad <= 4 ~ "EMD-Dep (Either Mild Distress: Depression)",
+			gad >= 5 & gad <= 9 & phq <= 4 ~ "EMD-Anx (Either Mild Distress: Anxiety)",
+			phq >= 0 & phq <= 4 & gad >= 0 & gad <= 4 ~ "None (Minimal Distress)",
+			TRUE ~ "Other/Out-of-rule"
+		)
+	)
+
+distress_counts <- distress_df %>%
+	filter(!distress_strata %in% c("Unclassified (missing PHQ/GAD)", "Other/Out-of-rule")) %>%
+	count(distress_strata, name = "n") %>%
+	mutate(
+		pct = n / sum(n),
+		label = paste0(n, " (", percent(pct, accuracy = 0.1), ")"),
+		distress_strata = factor(
+			distress_strata,
+			levels = c(
+				"BD (Both Distress)",
+				"BMD (Both Mild Distress)",
+				"ED-Dep (Either Distress: Depression)",
+				"ED-Anx (Either Distress: Anxiety)",
+				"EMD-Dep (Either Mild Distress: Depression)",
+				"EMD-Anx (Either Mild Distress: Anxiety)",
+				"None (Minimal Distress)"
+			)
+		)
+	)
+
+p_distress_strata <- ggplot(distress_counts, aes(x = distress_strata, y = n, fill = distress_strata)) +
+	geom_col(show.legend = FALSE) +
+	geom_text(aes(label = label), vjust = -0.4, size = 3.2) +
+	labs(
+		title = "Participant counts by PHQ/GAD distress strata",
+		x = NULL,
+		y = "Number of participants"
+	) +
+	scale_y_continuous(expand = expansion(mult = c(0, 0.1))) +
+	theme_minimal(base_size = 11) +
+	theme(axis.text.x = element_text(angle = 20, hjust = 1))
+
+save_plot(p_distress_strata, "22_distress_strata_counts", width = 10, height = 5)
+p_distress_strata
+```
+
+
+## 4) Core repeated-measures plots (by video)
+
+These visualizations directly capture the main hypothesis area: how emotional response and immersion vary across videos.
+
+```{r repeated-measures-violin, fig.width=11, fig.height=6}
+p_repeated_violin <- ggplot(ratings_long, aes(x = video, y = score, fill = video)) +
+	geom_violin(alpha = 0.4, trim = FALSE, color = NA) +
+	geom_boxplot(width = 0.15, outlier.alpha = 0.25) +
+	facet_wrap(~ measure, ncol = 3, scales = "free_y") +
+	labs(
+		title = "Valence, arousal, and immersion across videos",
+		x = "Video",
+		y = "Score"
+	) +
+	theme_minimal(base_size = 11) +
+	theme(legend.position = "none")
+
+save_plot(p_repeated_violin, "07_valence_arousal_immersion_by_video", width = 11, height = 6)
+p_repeated_violin
+```
+
+```{r repeated-measures-spaghetti, fig.width=11, fig.height=6}
+p_repeated_spaghetti <- ggplot(ratings_long, aes(x = video, y = score, group = participant)) +
+	geom_line(alpha = 0.18, color = "gray40") +
+	stat_summary(aes(group = 1), fun = mean, geom = "line", color = "#D62728", size = 1.2) +
+	stat_summary(aes(group = 1), fun = mean, geom = "point", color = "#D62728", size = 2) +
+	facet_wrap(~ measure, ncol = 3, scales = "free_y") +
+	labs(
+		title = "Participant trajectories + mean trend per video",
+		x = "Video",
+		y = "Score"
+	) +
+	theme_minimal(base_size = 11)
+
+save_plot(p_repeated_spaghetti, "08_participant_trajectories_by_video", width = 11, height = 6)
+p_repeated_spaghetti
+```
+
+
+## 5) Valence-arousal space (circumplex view)
+
+This plot captures each video's emotional profile in 2D affective space.
+
+```{r circumplex, fig.width=10, fig.height=6}
+p_circumplex <- ggplot(va_wide, aes(x = valence, y = arousal)) +
+	geom_point(alpha = 0.45, color = "#1F77B4") +
+	stat_summary(fun = mean, geom = "point", color = "#D62728", size = 3) +
+	facet_wrap(~ video) +
+	scale_x_continuous(limits = c(1, 9), breaks = 1:9) +
+	scale_y_continuous(limits = c(1, 9), breaks = 1:9) +
+	labs(
+		title = "Valence-arousal distribution by video",
+		x = "Valence",
+		y = "Arousal"
+	) +
+	theme_minimal(base_size = 11)
+
+save_plot(p_circumplex, "09_valence_arousal_circumplex_by_video", width = 10, height = 6)
+p_circumplex
+```
+
+
+## 6) Affect change (start vs end)
+
+These plots show whether the full experiment changes positive/negative affect.
+
+```{r prepost-slope, fig.width=10, fig.height=5}
+p_prepost_slope <- ggplot(prepost_long, aes(x = time, y = score, group = participant)) +
+	geom_line(alpha = 0.2, color = "gray45") +
+	stat_summary(aes(group = 1), fun = mean, geom = "line", color = "#D62728", size = 1.2) +
+	stat_summary(aes(group = 1), fun = mean, geom = "point", color = "#D62728", size = 2) +
+	facet_wrap(~ affect, scales = "free_y") +
+	labs(
+		title = "Pre-post affect change",
+		x = NULL,
+		y = "Score"
+	) +
+	theme_minimal(base_size = 11)
+
+save_plot(p_prepost_slope, "10_prepost_affect_slope", width = 10, height = 5)
+p_prepost_slope
+```
+
+```{r prepost-delta, fig.width=8, fig.height=4}
+delta_affect <- data_main %>%
+	transmute(
+		participant,
+		delta_positive = positive_affect_end - positive_affect_start,
+		delta_negative = negative_affect_end - negative_affect_start
+	) %>%
+	pivot_longer(-participant, names_to = "metric", values_to = "delta")
+
+p_prepost_delta <- ggplot(delta_affect, aes(x = metric, y = delta, fill = metric)) +
+	geom_hline(yintercept = 0, linetype = "dashed", color = "gray40") +
+	geom_violin(alpha = 0.35, trim = FALSE) +
+	geom_boxplot(width = 0.18, outlier.alpha = 0.3) +
+	labs(
+		title = "Distribution of affect change (end - start)",
+		x = NULL,
+		y = "Delta"
+	) +
+	theme_minimal(base_size = 11) +
+	theme(legend.position = "none")
+
+save_plot(p_prepost_delta, "11_prepost_affect_delta", width = 8, height = 4)
+p_prepost_delta
+```
+
+
+## 7) Immersion relationships
+
+This checks whether stronger immersion is associated with stronger emotional responses.
+
+```{r immersion-links, fig.width=10, fig.height=5}
+immersion_va <- data_main %>%
+	select(participant, matches("^(valence|arousal|immersion)_v[1-5]$")) %>%
+	pivot_longer(
+		cols = -participant,
+		names_to = c("measure", "video"),
+		names_pattern = "(valence|arousal|immersion)_v([1-5])",
+		values_to = "score"
+	) %>%
+	mutate(video = factor(paste0("v", video), levels = paste0("v", 1:5))) %>%
+	pivot_wider(names_from = measure, values_from = score)
+
+p1 <- ggplot(immersion_va, aes(x = immersion, y = valence, color = video)) +
+	geom_point(alpha = 0.5) +
+	geom_smooth(method = "lm", se = FALSE) +
+	labs(title = "Immersion vs Valence", x = "Immersion", y = "Valence") +
+	theme_minimal(base_size = 11)
+
+p2 <- ggplot(immersion_va, aes(x = immersion, y = arousal, color = video)) +
+	geom_point(alpha = 0.5) +
+	geom_smooth(method = "lm", se = FALSE) +
+	labs(title = "Immersion vs Arousal", x = "Immersion", y = "Arousal") +
+	theme_minimal(base_size = 11)
+
+save_plot(p1, "12_immersion_vs_valence", width = 10, height = 5)
+save_plot(p2, "13_immersion_vs_arousal", width = 10, height = 5)
+
+p1
+p2
+```
+
+
+## 8) Head-tracking processing and plots
+
+This section summarizes movement behavior using the head-tracking schema in the experiment data.
+`RotationChangeX/Y/Z` are frame-to-frame rotational changes (not absolute orientation angles),
+and `RotationSpeedTotal` is the instantaneous rotation-speed magnitude.
+
+```{r headtracking-load}
+head_files <- list.files("data/headtracking-data", pattern = "\\.csv$", recursive = TRUE, full.names = TRUE)
+
+pick_col <- function(nms, patterns) {
+	lower <- tolower(nms)
+	exact <- which(lower %in% tolower(patterns))
+	if (length(exact) > 0) return(nms[exact[1]])
+
+	pat <- paste0("(", paste(patterns, collapse = "|"), ")")
+	fuzzy <- which(str_detect(lower, pat))
+	if (length(fuzzy) > 0) return(nms[fuzzy[1]])
+
+	NA_character_
+}
+
+read_head_file <- function(path) {
+	df <- readr::read_csv(path, show_col_types = FALSE)
+	nms <- names(df)
+
+	time_col <- pick_col(nms, c("timestamp", "time", "elapsed_time", "elapsedtime", "seconds", "time_s"))
+	rot_change_y_col <- pick_col(nms, c("rotationchangey", "yaw", "head_yaw", "rotation_y", "camerayaw"))
+	rot_change_x_col <- pick_col(nms, c("rotationchangex", "pitch", "head_pitch", "rotation_x", "camerapitch"))
+	rot_change_z_col <- pick_col(nms, c("rotationchangez", "roll", "head_roll", "rotation_z", "cameraroll"))
+	ang_vel_col <- pick_col(nms, c("rotationspeedtotal", "rotation_speed_total", "angular_speed_total"))
+
+	out <- tibble(
+		time_raw = if (!is.na(time_col)) suppressWarnings(as.numeric(df[[time_col]])) else seq_len(nrow(df)),
+		rot_change_y = if (!is.na(rot_change_y_col)) suppressWarnings(as.numeric(df[[rot_change_y_col]])) else NA_real_,
+		rot_change_x = if (!is.na(rot_change_x_col)) suppressWarnings(as.numeric(df[[rot_change_x_col]])) else NA_real_,
+		rot_change_z = if (!is.na(rot_change_z_col)) suppressWarnings(as.numeric(df[[rot_change_z_col]])) else NA_real_,
+		ang_vel_raw = if (!is.na(ang_vel_col)) suppressWarnings(as.numeric(df[[ang_vel_col]])) else NA_real_
+	) %>%
+		mutate(
+			file_name = basename(path),
+			video = basename(dirname(path))
+		)
+
+	out
+}
+
+head_long <- map_dfr(head_files, read_head_file) %>%
+	group_by(file_name, video) %>%
+	mutate(
+		time_sec = time_raw - first(time_raw),
+		max_time_sec = suppressWarnings(max(time_sec, na.rm = TRUE)),
+		time_sec = if_else(is.finite(max_time_sec) & max_time_sec > 2000, time_sec / 1000, time_sec),
+		time_sec = if_else(is.na(time_sec), row_number() / 60, time_sec)
+	) %>%
+	select(-max_time_sec) %>%
+	ungroup()
+
+head_read_check <- head_long %>%
+	summarise(
+		rows = n(),
+		rot_change_y_non_na = mean(!is.na(rot_change_y)),
+		rot_change_x_non_na = mean(!is.na(rot_change_x)),
+		rot_change_z_non_na = mean(!is.na(rot_change_z)),
+		ang_vel_raw_non_na = mean(!is.na(ang_vel_raw))
+	)
+
+head_read_check
+
+head_summary <- head_long %>%
+	group_by(file_name, video) %>%
+	arrange(time_sec, .by_group = TRUE) %>%
+	mutate(
+		dt = pmax(time_sec - lag(time_sec), 1e-6),
+		drot_y = rot_change_y - lag(rot_change_y),
+		drot_x = rot_change_x - lag(rot_change_x),
+		ang_vel_calc = sqrt((drot_y)^2 + (drot_x)^2) / dt,
+		ang_vel = dplyr::coalesce(ang_vel_raw, ang_vel_calc)
+	) %>%
+	summarise(
+		rot_change_y_sd = sd(rot_change_y, na.rm = TRUE),
+		rot_change_x_sd = sd(rot_change_x, na.rm = TRUE),
+		rot_change_z_sd = sd(rot_change_z, na.rm = TRUE),
+		mean_ang_vel = mean(ang_vel, na.rm = TRUE),
+		.groups = "drop"
+	)
+
+head_summary %>% slice_head(n = 5)
+```
+
+```{r headtracking-traces, fig.width=11, fig.height=6}
+trace_files <- head_long %>%
+	distinct(file_name, video) %>%
+	group_by(video) %>%
+	slice_head(n = 1) %>%
+	ungroup()
+
+head_trace <- head_long %>%
+	inner_join(trace_files, by = c("file_name", "video"))
+
+p_head_trace <- ggplot(head_trace, aes(x = time_sec, y = rot_change_y, color = video)) +
+	geom_line(alpha = 0.8) +
+	facet_wrap(~ file_name, scales = "free_x") +
+	labs(
+		title = "Example RotationChangeY traces (one file per video)",
+		x = "Time (sec)",
+		y = "RotationChangeY"
+	) +
+	theme_minimal(base_size = 10) +
+	theme(legend.position = "none")
+
+save_plot(p_head_trace, "14_headtracking_rotationchangey_trace_examples", width = 11, height = 6)
+p_head_trace
+```
+
+```{r headtracking-summary-plot, fig.width=10, fig.height=5}
+head_summary_long <- head_summary %>%
+	select(video, rot_change_y_sd, mean_ang_vel) %>%
+	pivot_longer(cols = c(rot_change_y_sd, mean_ang_vel), names_to = "metric", values_to = "value") %>%
+	mutate(value = if_else(is.nan(value), NA_real_, value)) %>%
+	filter(!is.na(video), is.finite(value))
+
+# Violin needs enough points per group to estimate density reliably.
+violin_data <- head_summary_long %>%
+	add_count(video, metric, name = "n_group") %>%
+	filter(n_group >= 2)
+
+p_head_summary <- ggplot(head_summary_long, aes(x = video, y = value, fill = video)) +
+	geom_violin(data = violin_data, alpha = 0.35, trim = FALSE, color = NA) +
+	geom_boxplot(width = 0.15, outlier.alpha = 0.25) +
+	facet_wrap(~ metric, scales = "free_y") +
+	labs(
+		title = "Rotation-change variability and speed by video",
+		x = "Video",
+		y = "Value"
+	) +
+	theme_minimal(base_size = 11) +
+	theme(legend.position = "none")
+
+save_plot(p_head_summary, "15_headtracking_variability_and_speed_by_video", width = 10, height = 5)
+p_head_summary
+```
+
+
+## 9) Text responses (emotion/features/feedback)
+
+These plots summarize qualitative responses as token frequencies and simple sentiment trends.
+
+```{r text-setup}
+emotion_text <- data_main %>%
+	select(participant, matches("^emotion_v[1-5]$")) %>%
+	pivot_longer(-participant, names_to = "video", values_to = "text") %>%
+	mutate(video = str_extract(video, "v[1-5]"))
+
+features_text <- data_main %>%
+	select(participant, matches("^features_v[1-5]$")) %>%
+	pivot_longer(-participant, names_to = "video", values_to = "text") %>%
+	mutate(video = str_extract(video, "v[1-5]"))
+
+feedback_text <- data_main %>%
+	select(participant, feedback) %>%
+	rename(text = feedback) %>%
+	mutate(video = "overall")
+
+all_text <- bind_rows(
+	emotion_text %>% mutate(source = "emotion"),
+	features_text %>% mutate(source = "features"),
+	feedback_text %>% mutate(source = "feedback")
+) %>%
+	filter(!is.na(text), str_squish(text) != "")
+```
+
+```{r text-keywords, fig.width=11, fig.height=6}
+word_freq <- all_text %>%
+	unnest_tokens(word, text) %>%
+	anti_join(stop_words, by = "word") %>%
+	filter(str_detect(word, "[a-z]")) %>%
+	count(source, word, sort = TRUE) %>%
+	group_by(source) %>%
+	slice_max(n, n = 12, with_ties = FALSE) %>%
+	ungroup()
+
+p_word_freq <- ggplot(word_freq, aes(x = reorder_within(word, n, source), y = n, fill = source)) +
+	geom_col(show.legend = FALSE) +
+	scale_x_reordered() +
+	coord_flip() +
+	facet_wrap(~ source, scales = "free") +
+	labs(
+		title = "Top keywords by text source",
+		x = NULL,
+		y = "Frequency"
+	) +
+	theme_minimal(base_size = 11)
+
+save_plot(p_word_freq, "16_text_top_keywords_by_source", width = 11, height = 6)
+p_word_freq
+```
+
+```{r text-sentiment-video, fig.width=10, fig.height=5}
+emotion_sent <- emotion_text %>%
+	filter(!is.na(text), str_squish(text) != "") %>%
+	unnest_tokens(word, text) %>%
+	inner_join(get_sentiments("bing"), by = "word") %>%
+	count(video, participant, sentiment) %>%
+	pivot_wider(names_from = sentiment, values_from = n, values_fill = 0) %>%
+	mutate(sent_score = positive - negative)
+
+p_text_sentiment <- ggplot(emotion_sent, aes(x = video, y = sent_score, fill = video)) +
+	geom_violin(alpha = 0.35, trim = FALSE, color = NA) +
+	geom_boxplot(width = 0.15, outlier.alpha = 0.3) +
+	geom_hline(yintercept = 0, linetype = "dashed", color = "gray40") +
+	labs(
+		title = "Sentiment score from emotion text by video",
+		x = "Video",
+		y = "Sentiment score (positive - negative words)"
+	) +
+	theme_minimal(base_size = 11) +
+	theme(legend.position = "none")
+
+save_plot(p_text_sentiment, "17_text_sentiment_by_video", width = 10, height = 5)
+p_text_sentiment
+```
+
+
+## 10) Timing and fatigue check
+
+This captures practical flow of the experiment and whether duration may relate to outcomes.
+
+```{r timing-plots, fig.width=10, fig.height=4}
+time_df <- data_main %>%
+	mutate(
+		time_total_min = suppressWarnings(as.numeric(time_total))
+	)
+
+time_stats <- tibble(
+	stat = c("Mean", "Median", "Mode"),
+	value = c(
+		mean(time_df$time_total_min, na.rm = TRUE),
+		median(time_df$time_total_min, na.rm = TRUE),
+		get_mode(time_df$time_total_min)
+	)
+) %>%
+	mutate(stat_label = paste0(stat, ": ", round(value, 2)))
+
+time_color_map <- setNames(
+	c("#D62728", "#2CA02C", "#9467BD"),
+	time_stats$stat_label
+)
+
+p_time_hist <- ggplot(time_df, aes(x = time_total_min)) +
+	geom_histogram(bins = 20, fill = "#4C78A8", color = "white") +
+	geom_vline(
+		data = time_stats,
+		aes(xintercept = value, color = stat_label),
+		linetype = "dashed",
+		linewidth = 0.7,
+		inherit.aes = FALSE,
+		show.legend = TRUE
+	) +
+	scale_color_manual(values = time_color_map) +
+	labs(title = "Total experiment duration", x = "Minutes", y = "Count") +
+	theme_minimal(base_size = 11) +
+	theme(legend.title = element_blank())
+
+p_time_scatter <- ggplot(time_df, aes(x = time_total_min, y = score_vrise)) +
+	geom_point(alpha = 0.6, color = "#D62728") +
+	geom_smooth(method = "lm", se = FALSE, color = "gray30") +
+	labs(title = "Duration vs VRISE score", x = "Minutes", y = "VRISE score") +
+	theme_minimal(base_size = 11)
+
+save_plot(p_time_hist, "18_total_experiment_duration", width = 10, height = 4)
+save_plot(p_time_scatter, "19_duration_vs_vrise", width = 10, height = 4)
+
+p_time_hist
+p_time_scatter
+```
+
+
+## 11) Feasibility checks for revised analysis approach
+
+This section checks whether the revised approach is practical with current data:
+- participant-video linkage quality,
+- group-size adequacy,
+- nonparametric group tests,
+- continuous symptom-kinematic associations with multiple-testing control,
+- permutation-based null checks.
+
+```{r feasibility-linkage, fig.width=9, fig.height=4}
+participant_video_map <- data_main %>%
+	select(participant, score_phq, score_gad, score_stai_t, v1, v2, v3, v4, v5) %>%
+	pivot_longer(
+		cols = starts_with("v"),
+		names_to = "video",
+		values_to = "file_name"
+	) %>%
+	mutate(video = factor(video, levels = paste0("v", 1:5)))
+
+head_participant <- head_summary %>%
+	mutate(video = factor(video, levels = paste0("v", 1:5))) %>%
+	inner_join(participant_video_map, by = c("file_name", "video"))
+
+linkage_check <- participant_video_map %>%
+	left_join(
+		head_summary %>%
+			distinct(file_name, video) %>%
+			mutate(head_file_present = TRUE),
+		by = c("file_name", "video")
+	) %>%
+	mutate(matched = coalesce(head_file_present, FALSE)) %>%
+	group_by(video) %>%
+	summarise(
+		expected = n(),
+		matched = sum(matched),
+		match_rate = matched / expected,
+		.groups = "drop"
+	)
+
+p_linkage <- ggplot(linkage_check, aes(x = video, y = match_rate)) +
+	geom_col(fill = "#4C78A8") +
+	geom_text(aes(label = paste0(matched, "/", expected)), vjust = -0.3, size = 3.5) +
+	scale_y_continuous(labels = percent_format(accuracy = 1), limits = c(0, 1.05)) +
+	labs(
+		title = "Head-tracking linkage coverage by video",
+		x = "Video",
+		y = "Match rate"
+	) +
+	theme_minimal(base_size = 11)
+
+save_plot(p_linkage, "23_headtracking_linkage_coverage", width = 9, height = 4)
+p_linkage
+```
+
+```{r feasibility-collapsed-groups, fig.width=9, fig.height=4}
+participant_head <- head_participant %>%
+	group_by(participant, score_phq, score_gad, score_stai_t) %>%
+	summarise(
+		mean_ang_vel = mean(mean_ang_vel, na.rm = TRUE),
+		rot_change_y_sd = mean(rot_change_y_sd, na.rm = TRUE),
+		.groups = "drop"
+	) %>%
+	mutate(
+		distress_collapsed = case_when(
+			score_phq >= 10 | score_gad >= 10 ~ "Moderate/Severe (Either/Both)",
+			score_phq >= 5 | score_gad >= 5 ~ "Mild (Either/Both)",
+			TRUE ~ "Minimal"
+		),
+		distress_collapsed = factor(
+			distress_collapsed,
+			levels = c("Minimal", "Mild (Either/Both)", "Moderate/Severe (Either/Both)")
+		)
+	)
+
+collapsed_counts <- participant_head %>%
+	count(distress_collapsed, name = "n") %>%
+	mutate(label = paste0("n=", n))
+
+p_collapsed_counts <- ggplot(collapsed_counts, aes(x = distress_collapsed, y = n, fill = distress_collapsed)) +
+	geom_col(show.legend = FALSE) +
+	geom_hline(yintercept = 5, linetype = "dashed", color = "#D62728") +
+	geom_text(aes(label = label), vjust = -0.3, size = 3.5) +
+	labs(
+		title = "Collapsed distress groups for feasible comparisons",
+		x = NULL,
+		y = "Participants"
+	) +
+	theme_minimal(base_size = 11) +
+	coord_cartesian(ylim = c(0, max(collapsed_counts$n) * 1.15))
+
+save_plot(p_collapsed_counts, "24_collapsed_distress_group_counts", width = 9, height = 4)
+p_collapsed_counts
+
+collapsed_counts
+```
+
+```{r feasibility-tests}
+# Nonparametric group tests for collapsed groups
+kw_mean_ang <- kruskal.test(mean_ang_vel ~ distress_collapsed, data = participant_head)
+kw_rot_sd <- kruskal.test(rot_change_y_sd ~ distress_collapsed, data = participant_head)
+
+kw_results <- tibble(
+	metric = c("mean_ang_vel", "rot_change_y_sd"),
+	chi_sq = c(unname(kw_mean_ang$statistic), unname(kw_rot_sd$statistic)),
+	df = c(unname(kw_mean_ang$parameter), unname(kw_rot_sd$parameter)),
+	p_value = c(kw_mean_ang$p.value, kw_rot_sd$p.value)
+) %>%
+	mutate(p_bh = p.adjust(p_value, method = "BH"))
+
+kw_results
+```
+
+```{r feasibility-continuous-associations, fig.width=11, fig.height=6}
+assoc_plot_df <- participant_head %>%
+	pivot_longer(
+		cols = c(mean_ang_vel, rot_change_y_sd),
+		names_to = "metric",
+		values_to = "metric_value"
+	) %>%
+	pivot_longer(
+		cols = c(score_phq, score_gad, score_stai_t),
+		names_to = "scale",
+		values_to = "scale_value"
+	)
+
+assoc_tests <- tidyr::expand_grid(
+	metric = c("mean_ang_vel", "rot_change_y_sd"),
+	scale = c("score_phq", "score_gad", "score_stai_t")
+) %>%
+	mutate(
+		test_obj = map2(metric, scale, ~ cor.test(
+			x = participant_head[[.x]],
+			y = participant_head[[.y]],
+			method = "spearman",
+			exact = FALSE
+		)),
+		rho = map_dbl(test_obj, ~ unname(.x$estimate)),
+		p_value = map_dbl(test_obj, ~ .x$p.value)
+	) %>%
+	mutate(p_bh = p.adjust(p_value, method = "BH")) %>%
+	select(-test_obj)
+
+p_assoc <- ggplot(assoc_plot_df, aes(x = scale_value, y = metric_value)) +
+	geom_point(alpha = 0.65, color = "#1F77B4") +
+	geom_smooth(method = "lm", se = FALSE, color = "#D62728") +
+	facet_grid(metric ~ scale, scales = "free") +
+	labs(
+		title = "Continuous symptom scores vs kinematic metrics",
+		x = "Questionnaire score",
+		y = "Kinematic metric"
+	) +
+	theme_minimal(base_size = 11)
+
+save_plot(p_assoc, "25_continuous_symptom_vs_kinematic", width = 11, height = 6)
+p_assoc
+
+assoc_tests
+```
+
+```{r feasibility-permutation}
+set.seed(42)
+n_perm <- 2000
+
+obs_rho <- cor(participant_head$mean_ang_vel, participant_head$score_phq, method = "spearman", use = "pairwise.complete.obs")
+perm_rho <- replicate(
+	n_perm,
+	cor(participant_head$mean_ang_vel, sample(participant_head$score_phq), method = "spearman", use = "pairwise.complete.obs")
+)
+
+perm_p_two_sided <- mean(abs(perm_rho) >= abs(obs_rho))
+
+tibble(
+	metric = "mean_ang_vel",
+	scale = "score_phq",
+	observed_spearman_rho = obs_rho,
+	permutation_p_value = perm_p_two_sided,
+	n_permutations = n_perm
+)
+```
+
+
+## 12) Inferential snapshots for Report 1
+
+These plots provide concise inferential-style summaries with 95% confidence intervals.
+
+```{r inferential-video-ci, fig.width=10, fig.height=5}
+video_ci <- ratings_long %>%
+	group_by(video, measure) %>%
+	summarise(
+		n = sum(!is.na(score)),
+		mean_score = mean(score, na.rm = TRUE),
+		sd_score = sd(score, na.rm = TRUE),
+		se = sd_score / sqrt(n),
+		t_crit = qt(0.975, pmax(n - 1, 1)),
+		ci = t_crit * se,
+		.groups = "drop"
+	)
+
+p_video_ci <- ggplot(video_ci, aes(x = video, y = mean_score, color = measure, group = measure)) +
+	geom_line(linewidth = 0.9) +
+	geom_point(size = 2.2) +
+	geom_errorbar(aes(ymin = mean_score - ci, ymax = mean_score + ci), width = 0.12) +
+	facet_wrap(~ measure, scales = "free_y") +
+	labs(
+		title = "Mean score by video with 95% CI",
+		x = "Video",
+		y = "Mean score"
+	) +
+	theme_minimal(base_size = 11) +
+	theme(legend.position = "none")
+
+save_plot(p_video_ci, "20_video_mean_ci_by_measure", width = 10, height = 5)
+p_video_ci
+```
+
+```{r inferential-affect-delta-ci, fig.width=8, fig.height=4}
+delta_ci <- delta_affect %>%
+	mutate(
+		metric = recode(metric,
+			delta_positive = "Positive Affect (End - Start)",
+			delta_negative = "Negative Affect (End - Start)"
+		)
+	) %>%
+	group_by(metric) %>%
+	summarise(
+		n = sum(!is.na(delta)),
+		mean_delta = mean(delta, na.rm = TRUE),
+		sd_delta = sd(delta, na.rm = TRUE),
+		se = sd_delta / sqrt(n),
+		t_crit = qt(0.975, pmax(n - 1, 1)),
+		ci = t_crit * se,
+		.groups = "drop"
+	)
+
+p_delta_ci <- ggplot(delta_ci, aes(x = metric, y = mean_delta)) +
+	geom_hline(yintercept = 0, linetype = "dashed", color = "gray40") +
+	geom_pointrange(aes(ymin = mean_delta - ci, ymax = mean_delta + ci), color = "#1F77B4", linewidth = 0.8) +
+	coord_flip() +
+	labs(
+		title = "Mean affect change with 95% CI",
+		x = NULL,
+		y = "Mean delta"
+	) +
+	theme_minimal(base_size = 11)
+
+save_plot(p_delta_ci, "21_affect_delta_mean_ci", width = 8, height = 4)
+p_delta_ci
+```
+
+
+## Notes for initial interpretation
+
+- If violin/box shapes differ strongly across `v1` to `v5`, that supports video-specific emotional impact.
+- In spaghetti plots, consistent slope direction across many participants suggests robust repeated-measures effects.
+- In circumplex plots, separated centroids imply each video induces a distinct affective profile.
+- In pre-post slope and delta plots, systematic shifts from start to end indicate overall experiment-level affect change.
+- In head-tracking summaries, larger rotation-change variability/speed indicates higher head-movement intensity (not absolute gaze direction).
+- In text summaries, repeated keywords and sentiment shifts provide qualitative support for quantitative patterns.

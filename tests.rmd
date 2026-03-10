@@ -1,0 +1,255 @@
+# Depression-Movement Statistical Tests
+
+This file tests how depression (PHQ-9) relates to head-movement metrics.
+
+```{r setup, message=FALSE, warning=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+library(janitor)
+
+set.seed(42)
+```
+
+## 1) Load data and build movement metrics
+
+```{r data-load}
+data_main <- readr::read_csv("data/data.csv", show_col_types = FALSE) %>%
+	clean_names()
+
+head_files <- list.files(
+	"data/headtracking-data",
+	pattern = "\\.csv$",
+	recursive = TRUE,
+	full.names = TRUE
+)
+
+pick_col <- function(nms, patterns) {
+	lower <- tolower(nms)
+	exact <- which(lower %in% tolower(patterns))
+	if (length(exact) > 0) return(nms[exact[1]])
+
+	fuzzy <- which(stringr::str_detect(lower, paste0("(", paste(patterns, collapse = "|"), ")")))
+	if (length(fuzzy) > 0) return(nms[fuzzy[1]])
+
+	NA_character_
+}
+
+read_head_file <- function(path) {
+	# Some raw CSV fields are mixed-typed; we coerce needed columns manually below.
+	df <- suppressWarnings(readr::read_csv(path, show_col_types = FALSE))
+	nms <- names(df)
+
+	time_col <- pick_col(nms, c("timestamp", "time", "elapsed_time", "elapsedtime", "seconds", "time_s"))
+	rot_change_y_col <- pick_col(nms, c("rotationchangey", "yaw", "head_yaw", "rotation_y", "camerayaw"))
+	rot_change_x_col <- pick_col(nms, c("rotationchangex", "pitch", "head_pitch", "rotation_x", "camerapitch"))
+	speed_col <- pick_col(nms, c("rotationspeedtotal", "rotation_speed_total", "angular_speed_total"))
+
+	tibble(
+		file_name = basename(path),
+		video = basename(dirname(path)),
+		time_raw = if (!is.na(time_col)) suppressWarnings(as.numeric(df[[time_col]])) else seq_len(nrow(df)),
+		rot_change_y = if (!is.na(rot_change_y_col)) suppressWarnings(as.numeric(df[[rot_change_y_col]])) else NA_real_,
+		rot_change_x = if (!is.na(rot_change_x_col)) suppressWarnings(as.numeric(df[[rot_change_x_col]])) else NA_real_,
+		ang_vel_raw = if (!is.na(speed_col)) suppressWarnings(as.numeric(df[[speed_col]])) else NA_real_
+	)
+}
+
+head_long <- purrr::map_dfr(head_files, read_head_file) %>%
+	group_by(file_name, video) %>%
+	mutate(
+		time_sec = time_raw - first(time_raw),
+		max_time_sec = suppressWarnings(max(time_sec, na.rm = TRUE)),
+		time_sec = if_else(is.finite(max_time_sec) & max_time_sec > 2000, time_sec / 1000, time_sec),
+		time_sec = if_else(is.na(time_sec), row_number() / 60, time_sec)
+	) %>%
+	select(-max_time_sec) %>%
+	ungroup()
+
+head_summary <- head_long %>%
+	group_by(file_name, video) %>%
+	arrange(time_sec, .by_group = TRUE) %>%
+	mutate(
+		dt = pmax(time_sec - lag(time_sec), 1e-6),
+		drot_y = rot_change_y - lag(rot_change_y),
+		drot_x = rot_change_x - lag(rot_change_x),
+		ang_vel_calc = sqrt((drot_y)^2 + (drot_x)^2) / dt,
+		ang_vel = dplyr::coalesce(ang_vel_raw, ang_vel_calc)
+	) %>%
+	summarise(
+		rot_change_y_sd = sd(rot_change_y, na.rm = TRUE),
+		mean_ang_vel = mean(ang_vel, na.rm = TRUE),
+		.groups = "drop"
+	)
+
+participant_video_map <- data_main %>%
+	select(participant, score_phq, score_gad, score_stai_t, v1, v2, v3, v4, v5) %>%
+	pivot_longer(starts_with("v"), names_to = "video", values_to = "file_name") %>%
+	mutate(video = factor(video, levels = paste0("v", 1:5)))
+
+participant_head <- head_summary %>%
+	mutate(video = factor(video, levels = paste0("v", 1:5))) %>%
+	inner_join(participant_video_map, by = c("file_name", "video")) %>%
+	group_by(participant, score_phq, score_gad, score_stai_t) %>%
+	summarise(
+		mean_ang_vel = mean(mean_ang_vel, na.rm = TRUE),
+		rot_change_y_sd = mean(rot_change_y_sd, na.rm = TRUE),
+		.groups = "drop"
+	) %>%
+	mutate(
+		depression_group = factor(if_else(score_phq >= 10, "Depressed (PHQ>=10)", "Not depressed (PHQ<10)"))
+	)
+
+participant_head %>%
+	summarise(
+		n_participants = n(),
+		depressed_n = sum(depression_group == "Depressed (PHQ>=10)", na.rm = TRUE),
+		not_depressed_n = sum(depression_group == "Not depressed (PHQ<10)", na.rm = TRUE)
+	)
+```
+
+## 2) Automatic decision: t-test vs Wilcoxon (by normality)
+
+Rule used:
+- If each PHQ binary group has at least 3 observations and both groups pass Shapiro normality (`p > 0.05`), run Welch t-test.
+- Otherwise run Wilcoxon rank-sum test.
+
+```{r group-tests}
+safe_shapiro_p <- function(x) {
+	x <- x[is.finite(x)]
+	if (length(x) < 3 || length(x) > 5000) return(NA_real_)
+	out <- tryCatch(shapiro.test(x), error = function(e) NULL)
+	if (is.null(out)) return(NA_real_)
+	out$p.value
+}
+
+run_group_test <- function(df, metric_name) {
+	d <- df %>%
+		select(depression_group, all_of(metric_name)) %>%
+		filter(!is.na(depression_group), is.finite(.data[[metric_name]]))
+
+	g_levels <- levels(d$depression_group)
+	g1 <- d %>% filter(depression_group == g_levels[1]) %>% pull(all_of(metric_name))
+	g2 <- d %>% filter(depression_group == g_levels[2]) %>% pull(all_of(metric_name))
+
+	shapiro_g1 <- safe_shapiro_p(g1)
+	shapiro_g2 <- safe_shapiro_p(g2)
+
+	normal_ok <- is.finite(shapiro_g1) && is.finite(shapiro_g2) && shapiro_g1 > 0.05 && shapiro_g2 > 0.05
+
+	if (normal_ok) {
+		test_obj <- t.test(as.formula(paste(metric_name, "~ depression_group")), data = d, var.equal = FALSE)
+		test_type <- "Welch t-test"
+		stat_name <- "t"
+		stat_value <- unname(test_obj$statistic)
+	} else {
+		test_obj <- wilcox.test(as.formula(paste(metric_name, "~ depression_group")), data = d, exact = FALSE)
+		test_type <- "Wilcoxon rank-sum"
+		stat_name <- "W"
+		stat_value <- unname(test_obj$statistic)
+	}
+
+	tibble(
+		metric = metric_name,
+		n_total = nrow(d),
+		n_group_1 = length(g1),
+		n_group_2 = length(g2),
+		shapiro_p_group_1 = shapiro_g1,
+		shapiro_p_group_2 = shapiro_g2,
+		selected_test = test_type,
+		statistic_name = stat_name,
+		statistic_value = stat_value,
+		p_value = test_obj$p.value
+	)
+}
+
+group_test_results <- bind_rows(
+	run_group_test(participant_head, "mean_ang_vel"),
+	run_group_test(participant_head, "rot_change_y_sd")
+) %>%
+	mutate(p_value_bh = p.adjust(p_value, method = "BH"))
+
+group_test_results
+```
+
+## 3) Continuous PHQ association: Pearson vs Spearman
+
+Rule used:
+- If both variables are approximately normal (`Shapiro p > 0.05`), use Pearson.
+- Otherwise use Spearman.
+
+```{r correlation-tests}
+run_corr_test <- function(df, x_name, y_name) {
+	d <- df %>%
+		select(all_of(c(x_name, y_name))) %>%
+		filter(is.finite(.data[[x_name]]), is.finite(.data[[y_name]]))
+
+	shapiro_x <- safe_shapiro_p(d[[x_name]])
+	shapiro_y <- safe_shapiro_p(d[[y_name]])
+
+	use_pearson <- is.finite(shapiro_x) && is.finite(shapiro_y) && shapiro_x > 0.05 && shapiro_y > 0.05
+	method <- if (use_pearson) "pearson" else "spearman"
+
+	test_obj <- cor.test(d[[x_name]], d[[y_name]], method = method, exact = FALSE)
+
+	tibble(
+		outcome_metric = y_name,
+		n = nrow(d),
+		shapiro_p_phq = shapiro_x,
+		shapiro_p_metric = shapiro_y,
+		selected_method = str_to_title(method),
+		correlation = unname(test_obj$estimate),
+		p_value = test_obj$p.value
+	)
+}
+
+corr_results <- bind_rows(
+	run_corr_test(participant_head, "score_phq", "mean_ang_vel"),
+	run_corr_test(participant_head, "score_phq", "rot_change_y_sd")
+) %>%
+	mutate(p_value_bh = p.adjust(p_value, method = "BH"))
+
+corr_results
+```
+
+## 4) Optional: collapsed distress group nonparametric check
+
+This keeps PHQ+GAD clinical context (Minimal/Mild/Moderate-Severe).
+
+```{r collapsed-group-kw}
+participant_head_collapsed <- participant_head %>%
+	mutate(
+		distress_collapsed = case_when(
+			score_phq >= 10 | score_gad >= 10 ~ "Moderate/Severe",
+			score_phq >= 5 | score_gad >= 5 ~ "Mild",
+			TRUE ~ "Minimal"
+		),
+		distress_collapsed = factor(distress_collapsed, levels = c("Minimal", "Mild", "Moderate/Severe"))
+	)
+
+kw_results <- tibble(
+	metric = c("mean_ang_vel", "rot_change_y_sd"),
+	test_obj = list(
+		kruskal.test(mean_ang_vel ~ distress_collapsed, data = participant_head_collapsed),
+		kruskal.test(rot_change_y_sd ~ distress_collapsed, data = participant_head_collapsed)
+	)
+) %>%
+	mutate(
+		chi_sq = map_dbl(test_obj, ~ unname(.x$statistic)),
+		df = map_dbl(test_obj, ~ unname(.x$parameter)),
+		p_value = map_dbl(test_obj, ~ .x$p.value),
+		p_value_bh = p.adjust(p_value, method = "BH")
+	) %>%
+	select(-test_obj)
+
+kw_results
+```
+
+## 5) How to interpret test selection (for your report)
+
+- If `selected_test` is `Welch t-test`, assumptions were acceptable for that metric.
+- If `selected_test` is `Wilcoxon rank-sum`, normality was not supported (or sample was too small), so nonparametric was safer.
+- If `selected_method` is `Pearson`, both variables were approximately normal.
+- If `selected_method` is `Spearman`, rank-based correlation was preferred.
+
+After you run this file, share the printed `group_test_results`, `corr_results`, and `kw_results` tables with me and I will give you precise final wording for your presentation/report.
