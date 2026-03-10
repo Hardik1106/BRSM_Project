@@ -245,6 +245,69 @@ kw_results <- tibble(
 kw_results
 ```
 
+
+```{r}
+## VR Experience vs Head Movement
+
+# Merge VR experience info
+participant_head_vr <- participant_head %>%
+  left_join(data_main %>% select(participant, vr_experience), by = "participant") %>%
+  filter(vr_experience %in% c(1, 2)) %>%
+  mutate(
+    vr_group = factor(if_else(vr_experience == 2, "VR Experienced", "No VR Experience"))
+  )
+
+# Function for group test (same logic as above)
+run_vr_group_test <- function(df, metric_name) {
+  d <- df %>%
+    select(vr_group, all_of(metric_name)) %>%
+    filter(!is.na(vr_group), is.finite(.data[[metric_name]]))
+
+  g_levels <- levels(d$vr_group)
+  g1 <- d %>% filter(vr_group == g_levels[1]) %>% pull(all_of(metric_name))
+  g2 <- d %>% filter(vr_group == g_levels[2]) %>% pull(all_of(metric_name))
+
+  shapiro_g1 <- safe_shapiro_p(g1)
+  shapiro_g2 <- safe_shapiro_p(g2)
+
+  normal_ok <- is.finite(shapiro_g1) && is.finite(shapiro_g2) && shapiro_g1 > 0.05 && shapiro_g2 > 0.05
+
+  if (normal_ok) {
+    test_obj <- t.test(as.formula(paste(metric_name, "~ vr_group")), data = d, var.equal = FALSE)
+    test_type <- "Welch t-test"
+    stat_name <- "t"
+    stat_value <- unname(test_obj$statistic)
+  } else {
+    test_obj <- wilcox.test(as.formula(paste(metric_name, "~ vr_group")), data = d, exact = FALSE)
+    test_type <- "Wilcoxon rank-sum"
+    stat_name <- "W"
+    stat_value <- unname(test_obj$statistic)
+  }
+
+  tibble(
+    metric = metric_name,
+    n_total = nrow(d),
+    n_group_1 = length(g1),
+    n_group_2 = length(g2),
+    shapiro_p_group_1 = shapiro_g1,
+    shapiro_p_group_2 = shapiro_g2,
+    selected_test = test_type,
+    statistic_name = stat_name,
+    statistic_value = stat_value,
+    p_value = test_obj$p.value
+  )
+}
+
+vr_group_test_results <- bind_rows(
+  run_vr_group_test(participant_head_vr, "mean_ang_vel"),
+  run_vr_group_test(participant_head_vr, "rot_change_y_sd")
+) %>%
+  mutate(p_value_bh = p.adjust(p_value, method = "BH"))
+
+vr_group_test_results
+
+```
+
 ## 5) How to interpret test selection (for your report)
 
 - If `selected_test` is `Welch t-test`, assumptions were acceptable for that metric.
