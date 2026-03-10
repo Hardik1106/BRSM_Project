@@ -327,8 +327,8 @@ distress_counts <- distress_df %>%
 		)
 	)
 
-p_distress_strata <- ggplot(distress_counts, aes(x = distress_strata, y = n, fill = distress_strata)) +
-	geom_col(show.legend = FALSE) +
+p_distress_strata <- ggplot(distress_counts, aes(x = distress_strata, y = n)) +
+	geom_col(fill = "#4C78A8", show.legend = FALSE) +
 	geom_text(aes(label = label), vjust = -0.4, size = 3.2) +
 	labs(
 		title = "Participant counts by PHQ/GAD distress strata",
@@ -349,8 +349,8 @@ p_distress_strata
 These visualizations directly capture the main hypothesis area: how emotional response and immersion vary across videos.
 
 ```{r repeated-measures-violin, fig.width=11, fig.height=6}
-p_repeated_violin <- ggplot(ratings_long, aes(x = video, y = score, fill = video)) +
-	geom_violin(alpha = 0.4, trim = FALSE, color = NA) +
+p_repeated_violin <- ggplot(ratings_long, aes(x = video, y = score)) +
+	geom_violin(fill = "#4C78A8", alpha = 0.4, trim = FALSE, color = NA) +
 	geom_boxplot(width = 0.15, outlier.alpha = 0.25) +
 	facet_wrap(~ measure, ncol = 3, scales = "free_y") +
 	labs(
@@ -615,8 +615,8 @@ violin_data <- head_summary_long %>%
 	add_count(video, metric, name = "n_group") %>%
 	filter(n_group >= 2)
 
-p_head_summary <- ggplot(head_summary_long, aes(x = video, y = value, fill = video)) +
-	geom_violin(data = violin_data, alpha = 0.35, trim = FALSE, color = NA) +
+p_head_summary <- ggplot(head_summary_long, aes(x = video, y = value)) +
+	geom_violin(data = violin_data, fill = "#4C78A8", alpha = 0.35, trim = FALSE, color = NA) +
 	geom_boxplot(width = 0.15, outlier.alpha = 0.25) +
 	facet_wrap(~ metric, scales = "free_y") +
 	labs(
@@ -695,8 +695,8 @@ emotion_sent <- emotion_text %>%
 	pivot_wider(names_from = sentiment, values_from = n, values_fill = 0) %>%
 	mutate(sent_score = positive - negative)
 
-p_text_sentiment <- ggplot(emotion_sent, aes(x = video, y = sent_score, fill = video)) +
-	geom_violin(alpha = 0.35, trim = FALSE, color = NA) +
+p_text_sentiment <- ggplot(emotion_sent, aes(x = video, y = sent_score)) +
+	geom_violin(fill = "#4C78A8", alpha = 0.35, trim = FALSE, color = NA) +
 	geom_boxplot(width = 0.15, outlier.alpha = 0.3) +
 	geom_hline(yintercept = 0, linetype = "dashed", color = "gray40") +
 	labs(
@@ -844,8 +844,8 @@ collapsed_counts <- participant_head %>%
 	count(distress_collapsed, name = "n") %>%
 	mutate(label = paste0("n=", n))
 
-p_collapsed_counts <- ggplot(collapsed_counts, aes(x = distress_collapsed, y = n, fill = distress_collapsed)) +
-	geom_col(show.legend = FALSE) +
+p_collapsed_counts <- ggplot(collapsed_counts, aes(x = distress_collapsed, y = n)) +
+	geom_col(fill = "#4C78A8", show.legend = FALSE) +
 	geom_hline(yintercept = 5, linetype = "dashed", color = "#D62728") +
 	geom_text(aes(label = label), vjust = -0.3, size = 3.5) +
 	labs(
